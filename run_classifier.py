@@ -24,7 +24,7 @@ import csv
 import logging
 import os
 import modeling
-import optimization
+# import optimization
 import tokenization
 import tensorflow as tf
 
