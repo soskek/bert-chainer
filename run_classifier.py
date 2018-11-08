@@ -487,8 +487,9 @@ def main():
             device=FLAGS.gpu)
         trainer = training.Trainer(
             updater, (num_train_steps, 'iteration'), out=FLAGS.output_dir)
-        trainer.extend(extensions.snapshot(),
-                       trigger=(num_train_steps, 'iteration'))
+        trainer.extend(extensions.snapshot_object(
+            model, 'model_snapshot_iter_{.updater.iteration}.npz'),
+            trigger=(num_train_steps, 'iteration'))
         trainer.extend(extensions.LogReport(
             trigger=(50, 'iteration')))
         trainer.extend(extensions.PrintReport(

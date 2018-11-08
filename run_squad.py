@@ -18,9 +18,15 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+
+import argparse
 import collections
 import json
 import math
+import logging
 import os
 import modeling
 import optimization
@@ -28,122 +34,112 @@ import tokenization
 import six
 import tensorflow as tf
 
-flags = tf.flags
+from distutils.util import strtobool
 
-FLAGS = flags.FLAGS
+import chainer
+from chainer import functions as F
+from chainer import training
+from chainer.training import extensions
+import numpy as np
+import progressbar
 
-# Required parameters
-flags.DEFINE_string(
-    "bert_config_file", None,
-    "The config json file corresponding to the pre-trained BERT model. "
-    "This specifies the model architecture.")
+_logger = logging.getLogger(__name__)
 
-flags.DEFINE_string("vocab_file", None,
-                    "The vocabulary file that the BERT model was trained on.")
 
-flags.DEFINE_string(
-    "output_dir", None,
-    "The output directory where the model checkpoints will be written.")
+def get_arguments():
+    parser = argparse.ArgumentParser(description='Arxiv')
 
-# Other parameters
-flags.DEFINE_string("train_file", None,
-                    "SQuAD json for training. E.g., train-v1.1.json")
+    # Required parameters
+    parser.add_argument(
+        '--init_checkpoint', '--load_model_file', required=True,
+        help="Initial checkpoint (usually from a pre-trained BERT model)."
+        " The model array file path.")
+    parser.add_argument(
+        '--bert_config_file', required=True,
+        help="The config json file corresponding to the pre-trained BERT model. This specifies the model architecture.")
+    parser.add_argument(
+        '--vocab_file', required=True,
+        help="The vocabulary file that the BERT model was trained on.")
+    parser.add_argument(
+        '--output_dir', required=True,
+        help="The output directory where the model checkpoints will be written.")
+    parser.add_argument(
+        '--gpu', '-g', type=int, default=0,
+        help="The id of gpu device to be used [0-]. If -1 is given, cpu is used.")
 
-flags.DEFINE_string(
-    "predict_file", None,
-    "SQuAD json for predictions. E.g., dev-v1.1.json or test-v1.1.json")
+    # Other parameters
+    parser.add_argument(
+        '--train_file',
+        help="SQuAD json for training. E.g., train-v1.1.json")
+    parser.add_argument(
+        '--predict_file',
+        help="SQuAD json for predictions. E.g., dev-v1.1.json or test-v1.1.json")
+    parser.add_argument(
+        '--do_lower_case', type=strtobool, default='True',
+        help="Whether to lower case the input text. Should be True for uncased models and False for cased models.")
+    parser.add_argument(
+        '--max_seq_length', type=int, default=384,
+        help="The maximum total input sequence length after WordPiece tokenization. Sequences longer than this will be truncated, and sequences shorter than this will be padded.")
+    parser.add_argument(
+        '--doc_stride', type=int, default=128,
+        help="When splitting up a long document into chunks, how much stride to take between chunks.")
+    parser.add_argument(
+        '--max_query_length', type=int, default=64,
+        help="The maximum number of tokens for the question. Questions longer than this will be truncated to this length.")
 
-flags.DEFINE_string(
-    "init_checkpoint", None,
-    "Initial checkpoint (usually from a pre-trained BERT model).")
+    parser.add_argument(
+        '--do_train', type=strtobool, default='False',
+        help="Whether to run training.")
+    parser.add_argument(
+        '--do_predict', '--do_eval', type=strtobool, default='False',
+        help="Whether to run eval on the dev set.")
+    parser.add_argument(
+        '--train_batch_size', type=int, default=32,
+        help="Total batch size for training.")
+    parser.add_argument(
+        '--predict_batch_size', '--eval_batch_size', type=int, default=8,
+        help="Total batch size for predictions.")
+    parser.add_argument(
+        '--learning_rate', type=float, default=5e-5,
+        help="The initial learning rate for Adam.")
+    parser.add_argument(
+        '--num_train_epochs', type=float, default=3.0,
+        help="Total number of training epochs to perform.")
+    parser.add_argument(
+        '--warmup_proportion', type=float, default=0.1,
+        help="Proportion of training to perform linear learning rate warmup for. E.g., 0.1 = 10% of training.")
+    parser.add_argument(
+        '--save_checkpoints_steps', type=int, default=1000,
+        help="How often to save the model checkpoint.")
+    parser.add_argument(
+        '--iterations_per_loop', type=int, default=1000,
+        help="How many steps to make in each estimator call.")
+    parser.add_argument(
+        '--n_best_size', type=int, default=20,
+        help="The total number of n-best predictions to generate in the "
+        "nbest_predictions.json output file.")
+    parser.add_argument(
+        '--max_answer_length', type=int, default=30,
+        help="The maximum length of an answer that can be generated. This is needed "
+        "because the start and end predictions are not conditioned on one another.")
+    parser.add_argument(
+        '--verbose_logging', type=strtobool, default='False',
+        help="If true, all of the warnings related to data processing will be printed. "
+        "A number of warnings are expected for a normal SQuAD evaluation.")
 
-flags.DEFINE_bool(
-    "do_lower_case", True,
-    "Whether to lower case the input text. Should be True for uncased "
-    "models and False for cased models.")
+    # These args are NOT used in this port.
+    parser.add_argument('--use_tpu', type=strtobool, default='False')
+    parser.add_argument('--tpu_name')
+    parser.add_argument('--tpu_zone')
+    parser.add_argument('--gcp_project')
+    parser.add_argument('--master')
+    parser.add_argument('--num_tpu_cores', type=int, default=8)
 
-flags.DEFINE_integer(
-    "max_seq_length", 384,
-    "The maximum total input sequence length after WordPiece tokenization. "
-    "Sequences longer than this will be truncated, and sequences shorter "
-    "than this will be padded.")
+    args = parser.parse_args()
+    return args
 
-flags.DEFINE_integer(
-    "doc_stride", 128,
-    "When splitting up a long document into chunks, how much stride to "
-    "take between chunks.")
 
-flags.DEFINE_integer(
-    "max_query_length", 64,
-    "The maximum number of tokens for the question. Questions longer than "
-    "this will be truncated to this length.")
-
-flags.DEFINE_bool("do_train", False, "Whether to run training.")
-
-flags.DEFINE_bool("do_predict", False, "Whether to run eval on the dev set.")
-
-flags.DEFINE_integer("train_batch_size", 32, "Total batch size for training.")
-
-flags.DEFINE_integer("predict_batch_size", 8,
-                     "Total batch size for predictions.")
-
-flags.DEFINE_float("learning_rate", 5e-5,
-                   "The initial learning rate for Adam.")
-
-flags.DEFINE_float("num_train_epochs", 3.0,
-                   "Total number of training epochs to perform.")
-
-flags.DEFINE_float(
-    "warmup_proportion", 0.1,
-    "Proportion of training to perform linear learning rate warmup for. "
-    "E.g., 0.1 = 10% of training.")
-
-flags.DEFINE_integer("save_checkpoints_steps", 1000,
-                     "How often to save the model checkpoint.")
-
-flags.DEFINE_integer("iterations_per_loop", 1000,
-                     "How many steps to make in each estimator call.")
-
-flags.DEFINE_integer(
-    "n_best_size", 20,
-    "The total number of n-best predictions to generate in the "
-    "nbest_predictions.json output file.")
-
-flags.DEFINE_integer(
-    "max_answer_length", 30,
-    "The maximum length of an answer that can be generated. This is needed "
-    "because the start and end predictions are not conditioned on one another.")
-
-flags.DEFINE_bool("use_tpu", False, "Whether to use TPU or GPU/CPU.")
-
-tf.flags.DEFINE_string(
-    "tpu_name", None,
-    "The Cloud TPU to use for training. This should be either the name "
-    "used when creating the Cloud TPU, or a grpc://ip.address.of.tpu:8470 "
-    "url.")
-
-tf.flags.DEFINE_string(
-    "tpu_zone", None,
-    "[Optional] GCE zone where the Cloud TPU is located in. If not "
-    "specified, we will attempt to automatically detect the GCE project from "
-    "metadata.")
-
-tf.flags.DEFINE_string(
-    "gcp_project", None,
-    "[Optional] Project name for the Cloud TPU-enabled project. If not "
-    "specified, we will attempt to automatically detect the GCE project from "
-    "metadata.")
-
-tf.flags.DEFINE_string("master", None, "[Optional] TensorFlow master URL.")
-
-flags.DEFINE_integer(
-    "num_tpu_cores", 8,
-    "Only used if `use_tpu` is True. Total number of TPU cores to use.")
-
-flags.DEFINE_bool(
-    "verbose_logging", False,
-    "If true, all of the warnings related to data processing will be printed. "
-    "A number of warnings are expected for a normal SQuAD evaluation.")
+FLAGS = get_arguments()
 
 
 class SquadExample(object):
@@ -194,17 +190,21 @@ class InputFeatures(object):
                  segment_ids,
                  start_position=None,
                  end_position=None):
-        self.unique_id = unique_id
+        self.unique_id = np.array([unique_id], 'i')  # shape changed
         self.example_index = example_index
         self.doc_span_index = doc_span_index
         self.tokens = tokens
         self.token_to_orig_map = token_to_orig_map
         self.token_is_max_context = token_is_max_context
-        self.input_ids = input_ids
-        self.input_mask = input_mask
-        self.segment_ids = segment_ids
-        self.start_position = start_position
-        self.end_position = end_position
+        self.input_ids = np.array(input_ids, 'i')
+        self.input_mask = np.array(input_mask, 'i')
+        self.segment_ids = np.array(segment_ids, 'i')
+        if start_position is not None:
+            self.start_position = np.array(
+                [start_position], 'i')  # shape changed
+        if end_position is not None:
+            self.end_position = np.array(
+                [end_position], 'i')  # shape changed
 
 
 def read_squad_examples(input_file, is_training):
@@ -263,8 +263,8 @@ def read_squad_examples(input_file, is_training):
                     cleaned_answer_text = " ".join(
                         tokenization.whitespace_tokenize(orig_answer_text))
                     if actual_text.find(cleaned_answer_text) == -1:
-                        tf.logging.warning("Could not find answer: '%s' vs. '%s'",
-                                           actual_text, cleaned_answer_text)
+                        _logger.warning("Could not find answer: '%s' vs. '%s'",
+                                        actual_text, cleaned_answer_text)
                         continue
 
                 example = SquadExample(
@@ -278,6 +278,56 @@ def read_squad_examples(input_file, is_training):
     return examples
 
 
+class Converter(object):
+    """Converts examples to features, and then batches and to_gpu."""
+
+    def __init__(self, is_training):
+        self.is_training = is_training
+
+    def __call__(self, features, gpu):
+        return self.make_batch(features, gpu)
+
+    def make_batch(self, features, gpu):
+        """Creates a concatenated batch from a list of data and to_gpu."""
+
+        all_unique_ids = []
+        all_input_ids = []
+        all_input_mask = []
+        all_segment_ids = []
+        all_start_positions = []
+        all_end_positions = []
+
+        for feature in features:
+            all_unique_ids.append(feature.unique_id)
+            all_input_ids.append(feature.input_ids)
+            all_input_mask.append(feature.input_mask)
+            all_segment_ids.append(feature.segment_ids)
+            if self.is_training:
+                all_start_positions.append(feature.start_position)
+                all_end_positions.append(feature.end_position)
+
+        def stack_and_to_gpu(data_list):
+            sdata = F.pad_sequence(data_list, length=None, padding=0).array
+            return chainer.dataset.to_device(gpu, sdata)
+
+        batch_unique_ids = stack_and_to_gpu(all_unique_ids).astype('i')
+        batch_input_ids = stack_and_to_gpu(all_input_ids).astype('i')
+        batch_input_mask = stack_and_to_gpu(all_input_mask).astype('f')
+        batch_input_segment_ids = stack_and_to_gpu(all_segment_ids).astype('i')
+        if self.is_training:
+            batch_start_positions = stack_and_to_gpu(
+                all_start_positions).astype('i')[:, 0]  # shape should be (batch_size, )
+            batch_end_positions = stack_and_to_gpu(
+                all_end_positions).astype('i')[:, 0]  # shape should be (batch_size, )
+            return (batch_input_ids, batch_input_mask,
+                    batch_input_segment_ids,
+                    batch_start_positions, batch_end_positions)
+        else:
+            return (batch_input_ids, batch_input_mask,
+                    batch_input_segment_ids,
+                    batch_unique_ids)
+
+
 def convert_examples_to_features(examples, tokenizer, max_seq_length,
                                  doc_stride, max_query_length, is_training):
     """Loads a data file into a list of `InputBatch`s."""
@@ -285,7 +335,8 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length,
     unique_id = 1000000000
 
     features = []
-    for (example_index, example) in enumerate(examples):
+    for (example_index, example) in enumerate(
+            progressbar.ProgressBar()(examples)):
         query_tokens = tokenizer.tokenize(example.question_text)
 
         if len(query_tokens) > max_query_length:
@@ -309,9 +360,9 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length,
                 tok_end_position = orig_to_tok_index[example.end_position + 1] - 1
             else:
                 tok_end_position = len(all_doc_tokens) - 1
-            (tok_start_position, tok_end_position) = _improve_answer_span(
-                all_doc_tokens, tok_start_position, tok_end_position, tokenizer,
-                example.orig_answer_text)
+                (tok_start_position, tok_end_position) = _improve_answer_span(
+                    all_doc_tokens, tok_start_position, tok_end_position, tokenizer,
+                    example.orig_answer_text)
 
         # The -3 accounts for [CLS], [SEP] and [SEP]
         max_tokens_for_doc = max_seq_length - len(query_tokens) - 3
@@ -364,16 +415,6 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length,
             # tokens are attended to.
             input_mask = [1] * len(input_ids)
 
-            # Zero-pad up to the sequence length.
-            while len(input_ids) < max_seq_length:
-                input_ids.append(0)
-                input_mask.append(0)
-                segment_ids.append(0)
-
-            assert len(input_ids) == max_seq_length
-            assert len(input_mask) == max_seq_length
-            assert len(segment_ids) == max_seq_length
-
             start_position = None
             end_position = None
             if is_training:
@@ -389,32 +430,6 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length,
                 doc_offset = len(query_tokens) + 2
                 start_position = tok_start_position - doc_start + doc_offset
                 end_position = tok_end_position - doc_start + doc_offset
-
-            if example_index < 20:
-                tf.logging.info("*** Example ***")
-                tf.logging.info("unique_id: %s" % (unique_id))
-                tf.logging.info("example_index: %s" % (example_index))
-                tf.logging.info("doc_span_index: %s" % (doc_span_index))
-                tf.logging.info("tokens: %s" % " ".join(
-                    [tokenization.printable_text(x) for x in tokens]))
-                tf.logging.info("token_to_orig_map: %s" % " ".join(
-                    ["%d:%d" % (x, y) for (x, y) in six.iteritems(token_to_orig_map)]))
-                tf.logging.info("token_is_max_context: %s" % " ".join([
-                    "%d:%s" % (x, y) for (x, y) in six.iteritems(token_is_max_context)
-                ]))
-                tf.logging.info("input_ids: %s" %
-                                " ".join([str(x) for x in input_ids]))
-                tf.logging.info(
-                    "input_mask: %s" % " ".join([str(x) for x in input_mask]))
-                tf.logging.info(
-                    "segment_ids: %s" % " ".join([str(x) for x in segment_ids]))
-                if is_training:
-                    answer_text = " ".join(
-                        tokens[start_position:(end_position + 1)])
-                    tf.logging.info("start_position: %d" % (start_position))
-                    tf.logging.info("end_position: %d" % (end_position))
-                    tf.logging.info(
-                        "answer: %s" % (tokenization.printable_text(answer_text)))
 
             features.append(
                 InputFeatures(
@@ -509,211 +524,6 @@ def _check_is_max_context(doc_spans, cur_span_index, position):
     return cur_span_index == best_span_index
 
 
-def create_model(bert_config, is_training, input_ids, input_mask, segment_ids,
-                 use_one_hot_embeddings):
-    """Creates a classification model."""
-    model = modeling.BertModel(
-        config=bert_config,
-        is_training=is_training,
-        input_ids=input_ids,
-        input_mask=input_mask,
-        token_type_ids=segment_ids,
-        use_one_hot_embeddings=use_one_hot_embeddings)
-
-    final_hidden = model.get_sequence_output()
-
-    final_hidden_shape = modeling.get_shape_list(final_hidden, expected_rank=3)
-    batch_size = final_hidden_shape[0]
-    seq_length = final_hidden_shape[1]
-    hidden_size = final_hidden_shape[2]
-
-    output_weights = tf.get_variable(
-        "cls/squad/output_weights", [2, hidden_size],
-        initializer=tf.truncated_normal_initializer(stddev=0.02))
-
-    output_bias = tf.get_variable(
-        "cls/squad/output_bias", [2], initializer=tf.zeros_initializer())
-
-    final_hidden_matrix = tf.reshape(final_hidden,
-                                     [batch_size * seq_length, hidden_size])
-    logits = tf.matmul(final_hidden_matrix, output_weights, transpose_b=True)
-    logits = tf.nn.bias_add(logits, output_bias)
-
-    logits = tf.reshape(logits, [batch_size, seq_length, 2])
-    logits = tf.transpose(logits, [2, 0, 1])
-
-    unstacked_logits = tf.unstack(logits, axis=0)
-
-    (start_logits, end_logits) = (unstacked_logits[0], unstacked_logits[1])
-
-    return (start_logits, end_logits)
-
-
-def model_fn_builder(bert_config, init_checkpoint, learning_rate,
-                     num_train_steps, num_warmup_steps, use_tpu,
-                     use_one_hot_embeddings):
-    """Returns `model_fn` closure for TPUEstimator."""
-
-    def model_fn(features, labels, mode, params):  # pylint: disable=unused-argument
-        """The `model_fn` for TPUEstimator."""
-
-        tf.logging.info("*** Features ***")
-        for name in sorted(features.keys()):
-            tf.logging.info("  name = %s, shape = %s" %
-                            (name, features[name].shape))
-
-        unique_ids = features["unique_ids"]
-        input_ids = features["input_ids"]
-        input_mask = features["input_mask"]
-        segment_ids = features["segment_ids"]
-
-        is_training = (mode == tf.estimator.ModeKeys.TRAIN)
-
-        (start_logits, end_logits) = create_model(
-            bert_config=bert_config,
-            is_training=is_training,
-            input_ids=input_ids,
-            input_mask=input_mask,
-            segment_ids=segment_ids,
-            use_one_hot_embeddings=use_one_hot_embeddings)
-
-        tvars = tf.trainable_variables()
-
-        initialized_variable_names = {}
-        scaffold_fn = None
-        if init_checkpoint:
-            (assignment_map,
-             initialized_variable_names) = modeling.get_assigment_map_from_checkpoint(
-                 tvars, init_checkpoint)
-            if use_tpu:
-
-                def tpu_scaffold():
-                    tf.train.init_from_checkpoint(
-                        init_checkpoint, assignment_map)
-                    return tf.train.Scaffold()
-
-                scaffold_fn = tpu_scaffold
-            else:
-                tf.train.init_from_checkpoint(init_checkpoint, assignment_map)
-
-        tf.logging.info("**** Trainable Variables ****")
-        for var in tvars:
-            init_string = ""
-            if var.name in initialized_variable_names:
-                init_string = ", *INIT_FROM_CKPT*"
-            tf.logging.info("  name = %s, shape = %s%s", var.name, var.shape,
-                            init_string)
-
-        output_spec = None
-        if mode == tf.estimator.ModeKeys.TRAIN:
-            seq_length = modeling.get_shape_list(input_ids)[1]
-
-            def compute_loss(logits, positions):
-                one_hot_positions = tf.one_hot(
-                    positions, depth=seq_length, dtype=tf.float32)
-                log_probs = tf.nn.log_softmax(logits, axis=-1)
-                loss = -tf.reduce_mean(
-                    tf.reduce_sum(one_hot_positions * log_probs, axis=-1))
-                return loss
-
-            start_positions = features["start_positions"]
-            end_positions = features["end_positions"]
-
-            start_loss = compute_loss(start_logits, start_positions)
-            end_loss = compute_loss(end_logits, end_positions)
-
-            total_loss = (start_loss + end_loss) / 2.0
-
-            train_op = optimization.create_optimizer(
-                total_loss, learning_rate, num_train_steps, num_warmup_steps, use_tpu)
-
-            output_spec = tf.contrib.tpu.TPUEstimatorSpec(
-                mode=mode,
-                loss=total_loss,
-                train_op=train_op,
-                scaffold_fn=scaffold_fn)
-        elif mode == tf.estimator.ModeKeys.PREDICT:
-            predictions = {
-                "unique_ids": unique_ids,
-                "start_logits": start_logits,
-                "end_logits": end_logits,
-            }
-            output_spec = tf.contrib.tpu.TPUEstimatorSpec(
-                mode=mode, predictions=predictions, scaffold_fn=scaffold_fn)
-        else:
-            raise ValueError(
-                "Only TRAIN and PREDICT modes are supported: %s" % (mode))
-
-        return output_spec
-
-    return model_fn
-
-
-def input_fn_builder(features, seq_length, is_training, drop_remainder):
-    """Creates an `input_fn` closure to be passed to TPUEstimator."""
-
-    all_unique_ids = []
-    all_input_ids = []
-    all_input_mask = []
-    all_segment_ids = []
-    all_start_positions = []
-    all_end_positions = []
-
-    for feature in features:
-        all_unique_ids.append(feature.unique_id)
-        all_input_ids.append(feature.input_ids)
-        all_input_mask.append(feature.input_mask)
-        all_segment_ids.append(feature.segment_ids)
-        if is_training:
-            all_start_positions.append(feature.start_position)
-            all_end_positions.append(feature.end_position)
-
-    def input_fn(params):
-        """The actual input function."""
-        batch_size = params["batch_size"]
-
-        num_examples = len(features)
-
-        # This is for demo purposes and does NOT scale to large data sets. We do
-        # not use Dataset.from_generator() because that uses tf.py_func which is
-        # not TPU compatible. The right way to load data is with TFRecordReader.
-        feature_map = {
-            "unique_ids":
-                tf.constant(all_unique_ids, shape=[
-                            num_examples], dtype=tf.int32),
-            "input_ids":
-                tf.constant(
-                    all_input_ids, shape=[num_examples, seq_length],
-                    dtype=tf.int32),
-            "input_mask":
-                tf.constant(
-                    all_input_mask,
-                    shape=[num_examples, seq_length],
-                    dtype=tf.int32),
-            "segment_ids":
-                tf.constant(
-                    all_segment_ids,
-                    shape=[num_examples, seq_length],
-                    dtype=tf.int32),
-        }
-        if is_training:
-            feature_map["start_positions"] = tf.constant(
-                all_start_positions, shape=[num_examples], dtype=tf.int32)
-            feature_map["end_positions"] = tf.constant(
-                all_end_positions, shape=[num_examples], dtype=tf.int32)
-
-        d = tf.data.Dataset.from_tensor_slices(feature_map)
-
-        if is_training:
-            d = d.repeat()
-            d = d.shuffle(buffer_size=100)
-
-        d = d.batch(batch_size=batch_size, drop_remainder=drop_remainder)
-        return d
-
-    return input_fn
-
-
 RawResult = collections.namedtuple("RawResult",
                                    ["unique_id", "start_logits", "end_logits"])
 
@@ -722,8 +532,8 @@ def write_predictions(all_examples, all_features, all_results, n_best_size,
                       max_answer_length, do_lower_case, output_prediction_file,
                       output_nbest_file):
     """Write final predictions to the json file."""
-    tf.logging.info("Writing predictions to: %s" % (output_prediction_file))
-    tf.logging.info("Writing nbest to: %s" % (output_nbest_file))
+    _logger.info("Writing predictions to: %s" % (output_prediction_file))
+    _logger.info("Writing nbest to: %s" % (output_nbest_file))
 
     example_index_to_features = collections.defaultdict(list)
     for feature in all_features:
@@ -739,11 +549,14 @@ def write_predictions(all_examples, all_features, all_results, n_best_size,
 
     all_predictions = collections.OrderedDict()
     all_nbest_json = collections.OrderedDict()
-    for (example_index, example) in enumerate(all_examples):
+    for (example_index, example) in enumerate(
+            progressbar.ProgressBar()(all_examples)):
         features = example_index_to_features[example_index]
 
         prelim_predictions = []
         for (feature_index, feature) in enumerate(features):
+            # (1, )-array -> int
+            feature.unique_id = feature.unique_id.tolist()[0]
             result = unique_id_to_result[feature.unique_id]
 
             start_indexes = _get_best_indexes(result.start_logits, n_best_size)
@@ -845,10 +658,10 @@ def write_predictions(all_examples, all_features, all_results, n_best_size,
         all_predictions[example.qas_id] = nbest_json[0]["text"]
         all_nbest_json[example.qas_id] = nbest_json
 
-    with tf.gfile.GFile(output_prediction_file, "w") as writer:
+    with open(output_prediction_file, "w") as writer:
         writer.write(json.dumps(all_predictions, indent=4) + "\n")
 
-    with tf.gfile.GFile(output_nbest_file, "w") as writer:
+    with open(output_nbest_file, "w") as writer:
         writer.write(json.dumps(all_nbest_json, indent=4) + "\n")
 
 
@@ -902,7 +715,7 @@ def get_final_text(pred_text, orig_text, do_lower_case):
     start_position = tok_text.find(pred_text)
     if start_position == -1:
         if FLAGS.verbose_logging:
-            tf.logging.info(
+            _logger.info(
                 "Unable to find text: '%s' in '%s'" % (pred_text, orig_text))
         return orig_text
     end_position = start_position + len(pred_text) - 1
@@ -912,8 +725,8 @@ def get_final_text(pred_text, orig_text, do_lower_case):
 
     if len(orig_ns_text) != len(tok_ns_text):
         if FLAGS.verbose_logging:
-            tf.logging.info("Length not equal after stripping spaces: '%s' vs '%s'",
-                            orig_ns_text, tok_ns_text)
+            _logger.info("Length not equal after stripping spaces: '%s' vs '%s'",
+                         orig_ns_text, tok_ns_text)
         return orig_text
 
     # We then project the characters in `pred_text` back to `orig_text` using
@@ -930,7 +743,7 @@ def get_final_text(pred_text, orig_text, do_lower_case):
 
     if orig_start_position is None:
         if FLAGS.verbose_logging:
-            tf.logging.info("Couldn't map start position")
+            _logger.info("Couldn't map start position")
         return orig_text
 
     orig_end_position = None
@@ -941,7 +754,7 @@ def get_final_text(pred_text, orig_text, do_lower_case):
 
     if orig_end_position is None:
         if FLAGS.verbose_logging:
-            tf.logging.info("Couldn't map end position")
+            _logger.info("Couldn't map end position")
         return orig_text
 
     output_text = orig_text[orig_start_position:(orig_end_position + 1)]
@@ -984,10 +797,40 @@ def _compute_softmax(scores):
     return probs
 
 
-def main(_):
-    tf.logging.set_verbosity(tf.logging.INFO)
+def evaluate(examples, iterator, model, converter, device,
+             predict_func):
+    all_results = []
+    all_features = []
+    total_iter = len(iterator.dataset) // iterator.batch_size + 1
+    for prebatch in progressbar.ProgressBar(max_value=total_iter)(iterator):
+        batch = converter(prebatch, device)
+        features_list = prebatch
+        # In `batch`, features is concatenated and to_gpu.
+        with chainer.no_backprop_mode(), chainer.using_config('train', False):
+            result = predict_func(*batch)
+            for i in range(len(prebatch)):
+                unique_id = int(result["unique_ids"][i])
+                start_logits = [float(x) for x in result["start_logits"][i]]
+                end_logits = [float(x) for x in result["end_logits"][i]]
+                all_results.append(
+                    RawResult(
+                        unique_id=unique_id,
+                        start_logits=start_logits,
+                        end_logits=end_logits))
+                all_features.append(features_list[i])
 
-    if not FLAGS.do_train and not FLAGS.do_predict:
+    output_prediction_file = os.path.join(
+        FLAGS.output_dir, "predictions.json")
+    output_nbest_file = os.path.join(
+        FLAGS.output_dir, "nbest_predictions.json")
+    write_predictions(examples, all_features, all_results,
+                      FLAGS.n_best_size, FLAGS.max_answer_length,
+                      FLAGS.do_lower_case, output_prediction_file,
+                      output_nbest_file)
+
+
+def main():
+    if not FLAGS.do_train and not FLAGS.do_predict and not FLAGS.do_print_test:
         raise ValueError(
             "At least one of `do_train` or `do_predict` must be True.")
 
@@ -1008,26 +851,11 @@ def main(_):
             "was only trained up to sequence length %d" %
             (FLAGS.max_seq_length, bert_config.max_position_embeddings))
 
-    tf.gfile.MakeDirs(FLAGS.output_dir)
+    if not os.path.isdir(FLAGS.output_dir):
+        os.makedirs(FLAGS.output_dir)
 
     tokenizer = tokenization.FullTokenizer(
         vocab_file=FLAGS.vocab_file, do_lower_case=FLAGS.do_lower_case)
-
-    tpu_cluster_resolver = None
-    if FLAGS.use_tpu and FLAGS.tpu_name:
-        tpu_cluster_resolver = tf.contrib.cluster_resolver.TPUClusterResolver(
-            FLAGS.tpu_name, zone=FLAGS.tpu_zone, project=FLAGS.gcp_project)
-
-    is_per_host = tf.contrib.tpu.InputPipelineConfig.PER_HOST_V2
-    run_config = tf.contrib.tpu.RunConfig(
-        cluster=tpu_cluster_resolver,
-        master=FLAGS.master,
-        model_dir=FLAGS.output_dir,
-        save_checkpoints_steps=FLAGS.save_checkpoints_steps,
-        tpu_config=tf.contrib.tpu.TPUConfig(
-            iterations_per_loop=FLAGS.iterations_per_loop,
-            num_shards=FLAGS.num_tpu_cores,
-            per_host_input_for_training=is_per_host))
 
     train_examples = None
     num_train_steps = None
@@ -1035,100 +863,87 @@ def main(_):
     if FLAGS.do_train:
         train_examples = read_squad_examples(
             input_file=FLAGS.train_file, is_training=True)
+        train_features = convert_examples_to_features(
+            train_examples, tokenizer, FLAGS.max_seq_length,
+            FLAGS.doc_stride, FLAGS.max_query_length, is_training=True)
         num_train_steps = int(
             len(train_examples) / FLAGS.train_batch_size * FLAGS.num_train_epochs)
         num_warmup_steps = int(num_train_steps * FLAGS.warmup_proportion)
 
-    model_fn = model_fn_builder(
-        bert_config=bert_config,
-        init_checkpoint=FLAGS.init_checkpoint,
-        learning_rate=FLAGS.learning_rate,
-        num_train_steps=num_train_steps,
-        num_warmup_steps=num_warmup_steps,
-        use_tpu=FLAGS.use_tpu,
-        use_one_hot_embeddings=FLAGS.use_tpu)
+    bert = modeling.BertModel(config=bert_config)
+    model = modeling.BertSQuAD(bert)
+    if FLAGS.do_train:
+        # If training, load BERT parameters only.
+        ignore_names = ['output/W', 'output/b']
+    else:
+        # If only do_predict, load all parameters.
+        ignore_names = None
+    chainer.serializers.load_npz(
+        FLAGS.init_checkpoint, model,
+        ignore_names=ignore_names)
 
-    # If TPU is not available, this will fall back to normal Estimator on CPU
-    # or GPU.
-    estimator = tf.contrib.tpu.TPUEstimator(
-        use_tpu=FLAGS.use_tpu,
-        model_fn=model_fn,
-        config=run_config,
-        train_batch_size=FLAGS.train_batch_size,
-        predict_batch_size=FLAGS.predict_batch_size)
+    if FLAGS.gpu >= 0:
+        chainer.backends.cuda.get_device_from_id(FLAGS.gpu).use()
+        model.to_gpu()
 
     if FLAGS.do_train:
-        train_features = convert_examples_to_features(
-            examples=train_examples,
-            tokenizer=tokenizer,
-            max_seq_length=FLAGS.max_seq_length,
-            doc_stride=FLAGS.doc_stride,
-            max_query_length=FLAGS.max_query_length,
-            is_training=True)
-        tf.logging.info("***** Running training *****")
-        tf.logging.info("  Num orig examples = %d", len(train_examples))
-        tf.logging.info("  Num split examples = %d", len(train_features))
-        tf.logging.info("  Batch size = %d", FLAGS.train_batch_size)
-        tf.logging.info("  Num steps = %d", num_train_steps)
-        train_input_fn = input_fn_builder(
-            features=train_features,
-            seq_length=FLAGS.max_seq_length,
-            is_training=True,
-            drop_remainder=True)
-        estimator.train(input_fn=train_input_fn, max_steps=num_train_steps)
+        # Adam with weight decay only for 2D matrices
+        optimizer = optimization.WeightDecayForMatrixAdam(
+            alpha=1.,  # ignore alpha. instead, use eta as actual lr
+            eps=1e-6, weight_decay_rate=0.01)
+        optimizer.setup(model)
+        optimizer.add_hook(chainer.optimizer.GradientClipping(1.))
+
+        train_iter = chainer.iterators.SerialIterator(
+            train_features, FLAGS.train_batch_size)
+        converter = Converter(is_training=True)
+        updater = training.updaters.StandardUpdater(
+            train_iter, optimizer,
+            converter=converter,
+            device=FLAGS.gpu,
+            loss_func=model.compute_loss)
+        trainer = training.Trainer(
+            updater, (num_train_steps, 'iteration'), out=FLAGS.output_dir)
+
+        # learning rate (eta) scheduling in Adam
+        lr_decay_init = FLAGS.learning_rate * \
+            (num_train_steps - num_warmup_steps) / num_train_steps
+        trainer.extend(extensions.LinearShift(  # decay
+            'eta', (lr_decay_init, 0.), (num_warmup_steps, num_train_steps)))
+        trainer.extend(extensions.WarmupShift(  # warmup
+            'eta', 0., num_warmup_steps, FLAGS.learning_rate))
+        trainer.extend(extensions.observe_value(
+            'eta', lambda trainer: trainer.updater.get_optimizer('main').eta),
+            trigger=(100, 'iteration'))  # logging
+
+        trainer.extend(extensions.snapshot_object(
+            model, 'model_snapshot_iter_{.updater.iteration}.npz'),
+            trigger=(num_train_steps // 2, 'iteration'))  # TODO
+        trainer.extend(extensions.LogReport(trigger=(100, 'iteration')))
+        trainer.extend(extensions.PrintReport(
+            ['iteration', 'main/loss',
+             'main/accuracy', 'elapsed_time', 'eta']))
+        trainer.extend(extensions.ProgressBar(update_interval=10))
+
+        trainer.run()
 
     if FLAGS.do_predict:
         eval_examples = read_squad_examples(
             input_file=FLAGS.predict_file, is_training=False)
         eval_features = convert_examples_to_features(
-            examples=eval_examples,
-            tokenizer=tokenizer,
-            max_seq_length=FLAGS.max_seq_length,
-            doc_stride=FLAGS.doc_stride,
-            max_query_length=FLAGS.max_query_length,
-            is_training=False)
+            eval_examples, tokenizer, FLAGS.max_seq_length,
+            FLAGS.doc_stride, FLAGS.max_query_length, is_training=False)
+        test_iter = chainer.iterators.SerialIterator(
+            eval_features, FLAGS.predict_batch_size,
+            repeat=False, shuffle=False)
+        converter = Converter(is_training=False)
 
-        tf.logging.info("***** Running predictions *****")
-        tf.logging.info("  Num orig examples = %d", len(eval_examples))
-        tf.logging.info("  Num split examples = %d", len(eval_features))
-        tf.logging.info("  Batch size = %d", FLAGS.predict_batch_size)
-
-        all_results = []
-
-        predict_input_fn = input_fn_builder(
-            features=eval_features,
-            seq_length=FLAGS.max_seq_length,
-            is_training=False,
-            drop_remainder=False)
-
-        # If running eval on the TPU, you will need to specify the number of
-        # steps.
-        all_results = []
-        for result in estimator.predict(
-                predict_input_fn, yield_single_examples=True):
-            if len(all_results) % 1000 == 0:
-                tf.logging.info("Processing example: %d" % (len(all_results)))
-            unique_id = int(result["unique_ids"])
-            start_logits = [float(x) for x in result["start_logits"].flat]
-            end_logits = [float(x) for x in result["end_logits"].flat]
-            all_results.append(
-                RawResult(
-                    unique_id=unique_id,
-                    start_logits=start_logits,
-                    end_logits=end_logits))
-
-        output_prediction_file = os.path.join(
-            FLAGS.output_dir, "predictions.json")
-        output_nbest_file = os.path.join(
-            FLAGS.output_dir, "nbest_predictions.json")
-        write_predictions(eval_examples, eval_features, all_results,
-                          FLAGS.n_best_size, FLAGS.max_answer_length,
-                          FLAGS.do_lower_case, output_prediction_file,
-                          output_nbest_file)
+        print('Evaluating ...')
+        evaluate(eval_examples, test_iter, model,
+                 converter=converter, device=FLAGS.gpu,
+                 predict_func=model.predict)
+        print('Finished.')
 
 
 if __name__ == "__main__":
-    flags.mark_flag_as_required("vocab_file")
-    flags.mark_flag_as_required("bert_config_file")
-    flags.mark_flag_as_required("output_dir")
-    tf.app.run()
+    main()

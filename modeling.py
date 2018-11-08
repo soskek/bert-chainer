@@ -148,6 +148,27 @@ class LayerNormalization3D(L.LayerNormalization):
         return out_3d
 
 
+class BertExtracter(chainer.Chain):
+    # Useless wrapper of bert, only for de-serialization alignment
+    # TODO: fix serialization of tf-BERT
+    def __init__(self, bert):
+        super(BertExtracter, self).__init__()
+        with self.init_scope():
+            self.bert = bert
+
+    def get_pooled_output(self, *args, **kwargs):
+        return self.bert.get_pooled_output(*args, **kwargs)
+
+    def get_embedding_output(self, *args, **kwargs):
+        return self.bert.get_embedding_output(*args, **kwargs)
+
+    def get_all_encoder_layers(self, *args, **kwargs):
+        return self.bert.get_all_encoder_layers(*args, **kwargs)
+
+    def get_sequence_output(self, *args, **kwargs):
+        return self.bert.get_sequence_output(*args, **kwargs)
+
+
 class BertClassifier(chainer.Chain):
     def __init__(self, bert, num_labels):
         super(BertClassifier, self).__init__()
@@ -165,9 +186,81 @@ class BertClassifier(chainer.Chain):
         output_layer = F.dropout(output_layer, 0.1)
         logits = self.output(output_layer)
         loss = F.softmax_cross_entropy(logits, labels)
-        chainer.report({'loss': loss.data}, self)
+        chainer.report({'loss': loss.array}, self)
         chainer.report({'accuracy': F.accuracy(logits, labels)}, self)
         return loss
+
+
+# For showing SQuAD accuracy with heuristics
+def check_answers(logits_var, labels_array, start_labels_array=None):
+    if start_labels_array is not None:
+        xp = chainer.cuda.get_array_module(labels_array)
+        logits_array = logits_var.array.copy()
+        assert (labels_array >= start_labels_array).all()
+        # set -inf to score of positions before "start_labels"
+        invalid_mask = xp.arange(logits_array.shape[1])[None] < \
+            start_labels_array[:, None]
+        logits_array = logits_array - invalid_mask * 10000.
+        return (logits_array.argmax(axis=1) == labels_array)
+    else:
+        return (logits_var.array.argmax(axis=1) == labels_array)
+
+
+class BertSQuAD(chainer.Chain):
+    def __init__(self, bert):
+        super(BertSQuAD, self).__init__()
+        with self.init_scope():
+            self.bert = bert
+            self.output = Linear3D(
+                None, 2,
+                initialW=create_initializer(initializer_range=0.02))
+
+    def __call__(self, input_ids, input_mask, token_type_ids):
+        final_hidden = self.bert.get_sequence_output(
+            input_ids,
+            input_mask,
+            token_type_ids)
+        batch_size = final_hidden.shape[0]
+        seq_length = final_hidden.shape[1]
+        hidden_size = final_hidden.shape[2]
+
+        final_hidden_matrix = F.reshape(
+            final_hidden, [batch_size * seq_length, hidden_size])
+
+        logits = self.output(final_hidden_matrix)
+
+        logits = F.reshape(logits, [batch_size, seq_length, 2])
+        logits = logits - (1 - input_mask[:, :, None]) * 1000.  # ignore pads
+        logits = F.transpose(logits, [2, 0, 1])
+
+        unstacked_logits = F.separate(logits, axis=0)
+
+        (start_logits, end_logits) = (unstacked_logits[0], unstacked_logits[1])
+        return (start_logits, end_logits)
+
+    def compute_loss(self, input_ids, input_mask, token_type_ids,
+                     start_positions, end_positions):
+        (start_logits, end_logits) = self.__call__(
+            input_ids, input_mask, token_type_ids)
+        start_loss = F.softmax_cross_entropy(start_logits, start_positions)
+        end_loss = F.softmax_cross_entropy(end_logits, end_positions)
+        total_loss = (start_loss + end_loss) / 2.0
+        chainer.report({'loss': total_loss.array}, self)
+
+        accuracy = (check_answers(start_logits, start_positions) *
+                    check_answers(end_logits, end_positions, start_positions)).mean()
+        chainer.report({'accuracy': accuracy}, self)
+        return total_loss
+
+    def predict(self, input_ids, input_mask, token_type_ids, unique_ids):
+        (start_logits, end_logits) = self.__call__(
+            input_ids, input_mask, token_type_ids)
+        predictions = {
+            "unique_ids": unique_ids[:, 0].tolist(),  # squeeze
+            "start_logits": start_logits.array.tolist(),
+            "end_logits": end_logits.array.tolist(),
+        }
+        return predictions
 
 
 class BertModel(chainer.Chain):
