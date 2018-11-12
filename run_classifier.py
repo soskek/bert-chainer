@@ -24,7 +24,7 @@ import csv
 import logging
 import os
 import modeling
-# import optimization
+import optimization
 import tokenization
 import tensorflow as tf
 
@@ -169,7 +169,7 @@ class DataProcessor(object):
     @classmethod
     def _read_tsv(cls, input_file, quotechar=None):
         """Reads a tab separated value file."""
-        with tf.gfile.Open(input_file, "r") as f:
+        with open(input_file, "r") as f:
             reader = csv.reader(f, delimiter="\t", quotechar=quotechar)
             lines = []
             for line in reader:
@@ -474,9 +474,13 @@ def main():
         model.to_gpu()
 
     if FLAGS.do_train:
-        # TODO: use special Adam from "optimization.py"
-        optimizer = chainer.optimizers.Adam(alpha=FLAGS.learning_rate)
+        # Adam with weight decay only for 2D matrices
+        optimizer = optimization.WeightDecayForMatrixAdam(
+            alpha=1.,  # ignore alpha. instead, use eta as actual lr
+            eps=1e-6, weight_decay_rate=0.01)
         optimizer.setup(model)
+        optimizer.add_hook(chainer.optimizer.GradientClipping(1.))
+
         train_iter = chainer.iterators.SerialIterator(
             train_examples, FLAGS.train_batch_size)
         converter = Converter(
@@ -487,6 +491,18 @@ def main():
             device=FLAGS.gpu)
         trainer = training.Trainer(
             updater, (num_train_steps, 'iteration'), out=FLAGS.output_dir)
+
+        # learning rate (eta) scheduling in Adam
+        lr_decay_init = FLAGS.learning_rate * \
+            (num_train_steps - num_warmup_steps) / num_train_steps
+        trainer.extend(extensions.LinearShift(  # decay
+            'eta', (lr_decay_init, 0.), (num_warmup_steps, num_train_steps)))
+        trainer.extend(extensions.WarmupShift(  # warmup
+            'eta', 0., num_warmup_steps, FLAGS.learning_rate))
+        trainer.extend(extensions.observe_value(
+            'eta', lambda trainer: trainer.updater.get_optimizer('main').eta),
+            trigger=(50, 'iteration'))  # logging
+
         trainer.extend(extensions.snapshot_object(
             model, 'model_snapshot_iter_{.updater.iteration}.npz'),
             trigger=(num_train_steps, 'iteration'))
