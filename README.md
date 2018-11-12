@@ -7,10 +7,11 @@ This implementation can load any pre-trained TensorFlow checkpoint for BERT (in 
 In the current implementation, we can
 
 - build BertModel and load pre-trained checkpoints from TensorFlow
-- apply it to sentence-level and token-level classification tasks (GLUE and SQuAD) for finetuning and evaluation (see [below](#fine-tuning-with-bert-running-the-examples))
-- extract token-level multi-layer features from sentences
+- use BERT for sentence-level classification tasks (on GLUE) (`run_classifier.py`)
+- use BERT for token-level classification tasks (on SQuAD) (`run_squad.py`)
+- extract token-level multi-layer features from sentences (`extract_features.py`)
 
-TODO:
+Not implemented:
 
 - pretraining of BertModel in a new corpus, with multiGPU
 - multilingual models (https://github.com/google-research/bert/blob/master/multilingual.md)
