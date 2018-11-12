@@ -8,6 +8,7 @@ In the current implementation, we can
 
 - build BertModel and load pre-trained checkpoints from TensorFlow
 - apply it to sentence-level and token-level classification tasks (GLUE and SQuAD) for finetuning and evaluation (see [below](#fine-tuning-with-bert-running-the-examples))
+- extract token-level multi-layer features from sentences
 
 TODO:
 
@@ -67,6 +68,7 @@ This model can return some kinds of outputs (by calling like `.get_pooled_output
 - `get_sequence_output`: a Variable of size [batch_size, sequence_length, hidden_size] which is the output from the BERT final block
 - `get_embedding_output`: a Variable of size [batch_size, sequence_length, hidden_size] which is the summed embedding of tokens, segments and positions
 
+An example on how to use this class is given in the `extract_features.py` script which can be used to extract the hidden states of the model for a given input.
 
 ### 2. `BertClassifier`
 
