@@ -1,3 +1,4 @@
+
 # coding=utf-8
 # Copyright 2018 The Google AI Language Team Authors.
 #
@@ -114,15 +115,13 @@ class Linear3D(L.Linear):
         return super(Linear3D, self).__call__(x)
 
     def __call__(self, x):
-        # TODO: efficient way
         if x.ndim == 2:
             return self.call(x)
         assert x.ndim == 3
 
-        x_2d = F.concat(F.separate(x, axis=1), axis=0)
+        x_2d = x.reshape((-1, x.shape[-1]))
         out_2d = self.call(x_2d)
-        out_3d = F.stack(F.split_axis(
-            out_2d, x.shape[1], axis=0), axis=1)
+        out_3d = out_2d.reshape(x.shape[:-1] + (out_2d.shape[-1], ))
         # (B, S, W)
         return out_3d
 
@@ -135,15 +134,13 @@ class LayerNormalization3D(L.LayerNormalization):
         return super(LayerNormalization3D, self).__call__(x)
 
     def __call__(self, x):
-        # TODO: efficient way
         if x.ndim == 2:
             return self.call(x)
         assert x.ndim == 3
 
-        x_2d = F.concat(F.separate(x, axis=1), axis=0)
+        x_2d = x.reshape((-1, x.shape[-1]))
         out_2d = self.call(x_2d)
-        out_3d = F.stack(F.split_axis(
-            out_2d, x.shape[1], axis=0), axis=1)
+        out_3d = out_2d.reshape(x.shape[:-1] + (out_2d.shape[-1], ))
         # (B, S, W)
         return out_3d
 
