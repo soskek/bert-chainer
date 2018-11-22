@@ -299,7 +299,7 @@ def main():
                         layers = collections.OrderedDict()
                         layers["index"] = layer_index
                         layers["values"] = [
-                            round(float(x), 6) for x in layer_output[b]
+                            round(float(x), 6) for x in layer_output[i]
                         ]
                         all_layers.append(layers)
                     features = collections.OrderedDict()
