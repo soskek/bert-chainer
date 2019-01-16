@@ -141,9 +141,9 @@ Corpus (MRPC) corpus and runs in less than several minutes on a single Tesla P10
 ```shell
 python run_classifier.py \
   --task_name MRPC \
-  --do_train \
-  --do_eval \
-  --do_lower_case \
+  --do_train True \
+  --do_eval True \
+  --do_lower_case True \
   --data_dir $GLUE_DIR/MRPC/ \
   --vocab_file $BERT_BASE_DIR/vocab.txt \
   --bert_config_file $BERT_BASE_DIR/bert_config.json \
