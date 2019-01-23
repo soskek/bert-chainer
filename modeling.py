@@ -773,7 +773,7 @@ class AttentionLayer(chainer.Chain):
             # masked positions, this operation will create a tensor which is 0.0 for
             # positions we want to attend and -10000.0 for masked positions.
             # adder = (1.0 - tf.cast(attention_mask, tf.float32)) * -10000.0
-            adder = (1.0 - attention_mask) * -10000.0
+            adder = (1.0 - F.cast(1.0 - attention_mask, 'float32')) * -10000.0
 
             # Since we are adding it to the raw scores before the softmax, this is
             # effectively the same as removing these entirely.
