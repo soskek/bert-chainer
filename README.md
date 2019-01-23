@@ -94,12 +94,6 @@ This code was tested on Python 3.5+. The requirements are:
 - Chainer
 - progressbar2
 
-To install the dependencies:
-
-```bash
-pip install -r ./requirements.txt
-```
-
 ## Fine-tuning with BERT: running the examples
 
 We showcase the same examples as [the original implementation](https://github.com/google-research/bert/): fine-tuning a sequence-level classifier on the MRPC classification corpus and a token-level classifier on the question answering dataset SQuAD.
